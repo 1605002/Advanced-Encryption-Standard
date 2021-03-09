@@ -1,11 +1,10 @@
 import binascii
 import time
 from BitVector import *
-from BitVector.BitVector import BitVectorIterator
 
-roundDix = {128:10, 192:12, 256:14}
+roundDix = {128:10, 192:12, 256:14} # {aesType: number of rounds}
 
-AES_modulus = BitVector(bitstring='100011011')
+AES_modulus = BitVector(bitstring='100011011') # Used in gf_multiply_modular()
 bzero = BitVector(hexstring="00")
 btwo = BitVector(hexstring="02")
 bsthree = BitVector(hexstring="63")
@@ -26,11 +25,16 @@ InvMixer = [
     [BitVector(hexstring="0D"), BitVector(hexstring="09"), BitVector(hexstring="0E"), BitVector(hexstring="0B")],
     [BitVector(hexstring="0B"), BitVector(hexstring="0D"), BitVector(hexstring="09"), BitVector(hexstring="0E")]
 ]
-
-gunTable = []
+"""
+A table to speed up bitvector multiplication.
+The Mixer and InvMixer matrix only contains eight distinct bitVectors.
+So we can precalculate their products with all 256 bitvectors.
+This will allow us to avoid multiplication in encryption or decryption process.
+"""
+gunTable = [] 
 
 def preCalc():
-    lagbe = {0, 1, 2, 3, 9, 11, 13, 14}
+    lagbe = {0, 1, 2, 3, 9, 11, 13, 14} # All the values present in Mixer and InvMixer
 
     for i in range(16):
         newRow = []
@@ -43,10 +47,19 @@ def preCalc():
 
         gunTable.append(newRow)
 
+    # gunTable[i][j] now contains i*j (in 2^8 GF field)
+
 def preCalcSBox():
+    """
+    SBox[i] = b ^ b<<1 ^ b<<2 ^ b<<3 ^ b<<4 ^ 63(hex)
+    b is the multiplicative inverse of i
+    b can be found using gf_MI()
+    InvSBox[SBox[i]] = i
+    """
+
     for i in range(0, 256):
         cur = BitVector(intVal=i, size=8)
-        cur = cur.gf_MI(AES_modulus, 8) if i > 0 else bzero
+        cur = cur.gf_MI(AES_modulus, 8) if i > 0 else bzero # 0 doesn't have a MI
 
         tmpa = BitVector(intVal=cur.intValue(), size=8)
         tmpb = BitVector(intVal=cur.intValue(), size=8)
@@ -54,7 +67,11 @@ def preCalcSBox():
         tmpd = BitVector(intVal=cur.intValue(), size=8)
         tmpe = BitVector(intVal=cur.intValue(), size=8)
 
-        tmpb << 1
+        """
+        For some peculiar reason, bitVectors do the circular shift in place.
+        tmpb << 1 returns the previous tmpb, but it will change tmpb to tmpb << 1 in place.
+        """
+        tmpb << 1 
         tmpc << 2
         tmpd << 3
         tmpe << 4
@@ -65,7 +82,14 @@ def preCalcSBox():
         InvSbox[nw.intValue()] = i
 
 def getMatrixForm(byteArray):
-    """Transforms "byteArray" to desired matrix form and returns it."""
+    """
+    Transforms "byteArray" to desired matrix form and returns it.
+    ["00", "01", "02, "05", "00", "01", "02, "05", "10", "11", "12, "51", "60", "A5", "BC, "00"] ->
+    [["00", "01, "02", "05"],
+     ["00", "01, "02", "05"],
+     ["10", "11, "12", "51"],
+     ["60", "A5", "BC", "00"]]
+    """
     metrix = [] # A 2D list to contain the words of "byteArray" in column-major order
     length = len(byteArray)
 
@@ -74,11 +98,6 @@ def getMatrixForm(byteArray):
         metrix.append(row)
 
     return metrix
-
-"""
-    In the following functions,
-    each of row, row1, row2 is a list with four BitVector objects representing a word.
-"""
 
 def subBytes(row):
     """Builds a new list by
@@ -109,7 +128,7 @@ def jog2(matrix1, matrix2):
     return [jog(row1, row2) for row1, row2 in zip(matrix1, matrix2)]
 
 def jogList(row):
-
+    """Calculates the xor of all elements in "row" list and returns it."""
     result = bzero
     for entry in row:
         result = result^entry
@@ -125,7 +144,7 @@ def left_shift(row, koybar):
     return nrow
 
 def left_shift2(matrix):
-    """Builds a new 2D list by left shifting each row by AES rules"""
+    """Builds a new 2D list by left shifting each row of "matrix" by AES rules"""
     return [left_shift(matrix[i], i) for i in range(4)]
 
 def right_shift(row, koybar):
@@ -137,7 +156,7 @@ def right_shift(row, koybar):
     return nrow
 
 def right_shift2(matrix):
-    """Builds a new 2D list by right shifting each row by AES rules"""
+    """Builds a new 2D list by right shifting each row of "matrix" by AES rules"""
     return [right_shift(matrix[i], i) for i in range(4)]
 
 def g(row, rc):
@@ -150,10 +169,12 @@ def g(row, rc):
 
 
 def multiply(matrix1, matrix2):
+    """Multiplies "matrix1" and "matrix2" using "gunTable" created previously and returns the product."""
     return [[jogList([gunTable[a.intValue()][b.intValue()] for a, b in zip(row, col)]) \
         for col in zip(*matrix2)] for row in matrix1]
 
 def printMatrix(matrix):
+    """Prints a bitVector matrix. Used for debugging."""
     for row in matrix:
         for entry in row:
             print(entry.get_bitvector_in_hex(), end=" ")
@@ -197,18 +218,17 @@ def scheduleKey(key):
         
         rc = btwo.gf_multiply_modular(rc, AES_modulus, 8) # round_constant = 2 * round_constant (with MOD)
 
-    """
-    for roundkey in scheduledKeys:
-        printMatrix(roundkey)
-    """
-
     return scheduledKeys
 
 def encryptBlock(block, expandedKeys, nro):
-    
+    """
+    Encrypts one block with "expandedKeys" keys and returns the cypher in hex array form.
+    block - hex array representing data block
+    """
+
     cypher = jog2(getMatrixForm(block), expandedKeys[0])    
 
-    for i in range(1, nro+1):
+    for i in range(1, nro+1): # AES algorithm of four steps in each round (except last one)
         cypher = subBytes2(cypher)
         cypher = left_shift2(cypher)
         if(i < nro): cypher = multiply(Mixer, cypher)
@@ -218,6 +238,11 @@ def encryptBlock(block, expandedKeys, nro):
     return cypherBlock
 
 def encryptFull(line, expandedKeys, nro):
+    """
+    Encrypts full data with "expandedKeys" keys and returns the cypher in hex array form.
+    line - hex array representing full data (possible padded with garbage)
+    """
+
     length = len(line)
     sz = len(expandedKeys[0][0])*4
     
@@ -228,6 +253,11 @@ def encryptFull(line, expandedKeys, nro):
     return result
 
 def decryptBlock(block, expandedKeys, nro):
+    """
+    Reverse process of encryptBlock().
+    Returns the actual data block in hex array form.
+    block - cypher block in hex array form.
+    """
     
     plainText = jog2(getMatrixForm(block), expandedKeys[0])
 
@@ -241,6 +271,11 @@ def decryptBlock(block, expandedKeys, nro):
     return plainTextBlock
 
 def decryptFull(line, expandedKeys, nro):
+    """
+    Reverse process of encryptfull().
+    Returns the actual data in hex array form.
+    block - full cypher text in hex array form.
+    """
     expandedKeys.reverse()
 
     length = len(line)
@@ -253,17 +288,26 @@ def decryptFull(line, expandedKeys, nro):
     return result
 
 def hexStringToArray(senHex):
+    """ "001256" -> ["00", "12", "56"] """
     length = len(senHex)
     senHex = [senHex[i:i+2] for i in range(0, length, 2)]
 
     return senHex
 
 def stringToHex(sentence):
+    """ Converts string to hex array and returns it. """
     return hexStringToArray(sentence.encode().hex())
 
+# latin-1 might produce ulta palta characters.
 def hexToString(senHex): return bytes.fromhex("".join(senHex)).decode("latin-1", errors="ignore")
 
 def takeInput():
+    """
+    title - file name or text data
+    isFile - True if we want to process a file else false
+    key - The key entered by the user
+    """
+
     isFile = bool(int(input("Enter 1 for text or 2 for file: "))-1)
     title = input("Enter " + ("file name" if isFile else "text") + ": ")
     key = input("Enter key: ")
@@ -271,6 +315,15 @@ def takeInput():
     return title, isFile, key
 
 def aes(aesType, title, isFile, key):
+    """
+    aesType - 128 or 192 or 256
+    title - text data or file name
+    key - key entered by the user
+
+    This function first schedules the key, then performs encryption and decryption on the text / file data.
+    Finally outputs the results and execution time of scheduling, encryption and decryption.
+    """
+
     print("\n\n\nAES-" + str(aesType) + ":\n")
 
     titleHex = stringToHex(title)
@@ -279,12 +332,15 @@ def aes(aesType, title, isFile, key):
             titleHex = f.read().hex()
             titleHex = hexStringToArray(titleHex)
 
-    keyHex = stringToHex(key)
+    # titleHex now contains hex array form of the data we need to encrypt.
+
+    keyHex = stringToHex(key) # hex array form of key
     titleLen, keyLen = len(titleHex), len(keyHex)
 
-    sz = int(aesType/8)
-    nro = roundDix[aesType]
+    sz = int(aesType/8) # Block size
+    nro = roundDix[aesType] # Number of rounds
 
+    # If the size of the key is less than block size, '0' is padded.
     while keyLen > sz:
         keyHex.pop()
         keyLen -= 1
@@ -292,6 +348,8 @@ def aes(aesType, title, isFile, key):
         keyHex.append("30")
         keyLen += 1
 
+    # Data needs to be a multiple of block size to perform encryption.
+    # If not, '\0' is added.
     extra = 0
     while((titleLen+extra)%sz != 0):
         titleHex.append("00")
@@ -309,7 +367,7 @@ def aes(aesType, title, isFile, key):
     encryptionTime = time.time()-startTime
 
     print("\n\nCypher text (in hex): " + "".join(cypherHex))
-    #print("Cypher text (in ASCII): " + hexToString(cypherHex))
+    print("Cypher text (in ASCII): " + hexToString(cypherHex))
 
     
     startTime = time.time()
@@ -318,6 +376,7 @@ def aes(aesType, title, isFile, key):
 
     print("\n\nDeciphered text/file contents (in hex): " + "".join(detitleHex))
 
+    # Extra '\0' characters added to the data are popped
     while extra > 0:
         detitleHex.pop()
         extra -= 1
@@ -326,7 +385,7 @@ def aes(aesType, title, isFile, key):
         with open("decrypted_" + str(aesType) + "_" + title, 'wb') as f:
             f.write(binascii.unhexlify("".join(detitleHex)))
 
-        print("\nNew decrypted_" + title + " file has been created.")
+        print("\nNew decrypted_" + str(aesType) + "_" + title + " file has been created.")
     else:
         print("\nDeciphered text (in ASCII): " + hexToString(detitleHex))
 
